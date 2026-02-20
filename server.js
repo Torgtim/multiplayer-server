@@ -1,7 +1,5 @@
 import { WebSocketServer } from "ws";
 
-const socket = new WebSocket("wss://multiplayer-server-production-40dc.up.railway.app");
-
 const wss = new WebSocketServer({ port: process.env.PORT || 3000 });
 
 let rooms = {};
