@@ -3,14 +3,14 @@ import { WebSocketServer } from "ws";
 const wss = new WebSocketServer({ port: process.env.PORT || 3000 });
 
 // === WORLD SETTINGS ===
-const WORLD_SIZE = 1500; // medium map
+const WORLD_SIZE = 1500;
 const MAX_PICKUPS = 8;
 
 // === ROOM STRUCTURE ===
 // rooms[code] = {
-//   players: { id: {...} },
-//   pickups: { pid: {...} },
-//   stats: { id: {...} },
+//   players: { id:{...} },
+//   pickups: { pid:{...} },
+//   stats: { id:{kills,deaths,damage} },
 //   nextPickupId: 1
 // }
 
@@ -83,7 +83,9 @@ wss.on("connection", ws => {
         name: data.name || "Player",
         hp: 100,
         ammo: 30,
-        abilityCooldown: 0
+        frozenUntil: 0,
+        poisonUntil: 0,
+        poisonDamage: 0
       };
 
       rooms[code].stats[ws.id] = { kills: 0, deaths: 0, damage: 0 };
@@ -121,7 +123,9 @@ wss.on("connection", ws => {
         name: data.name || "Player",
         hp: 100,
         ammo: 30,
-        abilityCooldown: 0
+        frozenUntil: 0,
+        poisonUntil: 0,
+        poisonDamage: 0
       };
 
       rooms[code].stats[ws.id] = rooms[code].stats[ws.id] || {
@@ -147,14 +151,16 @@ wss.on("connection", ws => {
       const p = room.players[ws.id];
       if (!p) return;
 
-      p.x = data.x;
-      p.y = data.y;
+      // Anti‑cheat: clamp pos
+      const half = WORLD_SIZE / 2;
+      p.x = Math.max(-half + 20, Math.min(half - 20, data.x));
+      p.y = Math.max(-half + 20, Math.min(half - 20, data.y));
+
       p.dir = data.dir;
       p.skin = data.skin || p.skin;
       p.name = data.name || p.name;
       p.hp = data.hp ?? p.hp;
       p.ammo = data.ammo ?? p.ammo;
-      p.abilityCooldown = data.abilityCooldown ?? p.abilityCooldown;
 
       broadcastRoom(ws.room);
     }
@@ -167,22 +173,36 @@ wss.on("connection", ws => {
 
       if (!room.players[targetId]) return;
 
-      room.players[targetId].hp -= dmg;
+      const target = room.players[targetId];
+
+      // Freeze check
+      if (target.frozenUntil > Date.now()) {
+        // still take damage
+      }
+
+      // Shield check
+      if (target.shield > 0) {
+        target.shield -= dmg;
+        if (target.shield < 0) target.shield = 0;
+      } else {
+        target.hp -= dmg;
+      }
+
       room.stats[ws.id].damage += dmg;
 
       let killEvent = null;
 
-      if (room.players[targetId].hp <= 0) {
-        room.players[targetId].hp = 0;
+      if (target.hp <= 0) {
+        target.hp = 0;
 
         room.stats[ws.id].kills++;
         room.stats[targetId].deaths++;
 
         const pos = randomPos();
-        room.players[targetId].x = pos.x;
-        room.players[targetId].y = pos.y;
-        room.players[targetId].hp = 100;
-        room.players[targetId].ammo = 30;
+        target.x = pos.x;
+        target.y = pos.y;
+        target.hp = 100;
+        target.ammo = 30;
 
         killEvent = {
           type: "killfeed",
@@ -192,6 +212,50 @@ wss.on("connection", ws => {
       }
 
       broadcastRoom(ws.room, killEvent);
+    }
+
+    // === FREEZE ===
+    if (data.type === "freeze" && ws.room && rooms[ws.room]) {
+      const room = rooms[ws.room];
+      const targetId = data.targetId;
+      const duration = data.duration;
+
+      if (!room.players[targetId]) return;
+
+      room.players[targetId].frozenUntil = Date.now() + duration;
+
+      // send effect
+      wss.clients.forEach(c => {
+        if (c.room === ws.room) {
+          c.send(JSON.stringify({
+            type: "freeze_effect",
+            targetId,
+            duration
+          }));
+        }
+      });
+    }
+
+    // === POISON ===
+    if (data.type === "poison" && ws.room && rooms[ws.room]) {
+      const room = rooms[ws.room];
+      const targetId = data.targetId;
+      const dmg = data.damage;
+
+      if (!room.players[targetId]) return;
+
+      room.players[targetId].poisonUntil = Date.now() + 3000;
+      room.players[targetId].poisonDamage = dmg;
+
+      wss.clients.forEach(c => {
+        if (c.room === ws.room) {
+          c.send(JSON.stringify({
+            type: "poison_effect",
+            targetId,
+            damage: dmg
+          }));
+        }
+      });
     }
 
     // === PICKUP ===
@@ -204,9 +268,9 @@ wss.on("connection", ws => {
       const pk = room.pickups[pid];
 
       if (pk.type === "ammo") p.ammo += pk.amount;
-      if (pk.type === "speed") p.speedBoost = Date.now() + 5000;
+      if (pk.type === "speed") p.speedBoostUntil = Date.now() + 3000;
       if (pk.type === "shield") p.shield = 50;
-      if (pk.type === "damage") p.damageBoost = Date.now() + 5000;
+      if (pk.type === "damage") p.damageBoostUntil = Date.now() + 3000;
 
       delete room.pickups[pid];
       broadcastRoom(ws.room);
