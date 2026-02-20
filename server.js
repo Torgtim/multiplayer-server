@@ -2,8 +2,19 @@ import { WebSocketServer } from "ws";
 
 const wss = new WebSocketServer({ port: process.env.PORT || 3000 });
 
-let rooms = {}; 
-// rooms[code] = { players: {id:{...}}, pickups: {pid:{...}}, nextPickupId, stats:{id:{kills,deaths,damage}} }
+// === WORLD SETTINGS ===
+const WORLD_SIZE = 1500; // medium map
+const MAX_PICKUPS = 8;
+
+// === ROOM STRUCTURE ===
+// rooms[code] = {
+//   players: { id: {...} },
+//   pickups: { pid: {...} },
+//   stats: { id: {...} },
+//   nextPickupId: 1
+// }
+
+let rooms = {};
 
 function makeRoomCode() {
   return Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -11,8 +22,8 @@ function makeRoomCode() {
 
 function randomPos() {
   return {
-    x: Math.floor(Math.random() * 1500) - 750,
-    y: Math.floor(Math.random() * 1500) - 750
+    x: Math.floor(Math.random() * WORLD_SIZE) - WORLD_SIZE / 2,
+    y: Math.floor(Math.random() * WORLD_SIZE) - WORLD_SIZE / 2
   };
 }
 
@@ -21,6 +32,7 @@ function spawnPickup(room) {
   const types = ["ammo", "speed", "shield", "damage"];
   const type = types[Math.floor(Math.random() * types.length)];
   const pos = randomPos();
+
   room.pickups[id] = {
     id,
     type,
@@ -34,12 +46,15 @@ setInterval(() => {
   for (const code in rooms) {
     const room = rooms[code];
     if (!room) continue;
+
     const count = Object.keys(room.pickups).length;
-    if (count < 8) spawnPickup(room);
+    if (count < MAX_PICKUPS) spawnPickup(room);
+
     broadcastRoom(code);
   }
-}, 5000);
+}, 4000);
 
+// === CONNECTION ===
 wss.on("connection", ws => {
   ws.id = Math.random().toString(36).substring(2, 10);
   ws.room = null;
@@ -48,16 +63,18 @@ wss.on("connection", ws => {
     let data;
     try { data = JSON.parse(raw); } catch { return; }
 
-    // create room
+    // === CREATE ROOM ===
     if (data.type === "create_room") {
       const code = makeRoomCode();
       const pos = randomPos();
+
       rooms[code] = {
         players: {},
         pickups: {},
-        nextPickupId: 1,
-        stats: {}
+        stats: {},
+        nextPickupId: 1
       };
+
       rooms[code].players[ws.id] = {
         x: pos.x,
         y: pos.y,
@@ -65,26 +82,37 @@ wss.on("connection", ws => {
         skin: "Default",
         name: data.name || "Player",
         hp: 100,
-        ammo: 30
+        ammo: 30,
+        abilityCooldown: 0
       };
+
       rooms[code].stats[ws.id] = { kills: 0, deaths: 0, damage: 0 };
+
       ws.room = code;
-      ws.send(JSON.stringify({ type: "room_created", code, id: ws.id }));
+      ws.send(JSON.stringify({
+        type: "room_created",
+        code,
+        id: ws.id,
+        worldSize: WORLD_SIZE
+      }));
+
       broadcastRoom(code);
     }
 
-    // join room
+    // === JOIN ROOM ===
     if (data.type === "join_room") {
       const code = data.code;
       if (!rooms[code]) {
         rooms[code] = {
           players: {},
           pickups: {},
-          nextPickupId: 1,
-          stats: {}
+          stats: {},
+          nextPickupId: 1
         };
       }
+
       const pos = randomPos();
+
       rooms[code].players[ws.id] = {
         x: pos.x,
         y: pos.y,
@@ -92,45 +120,63 @@ wss.on("connection", ws => {
         skin: "Default",
         name: data.name || "Player",
         hp: 100,
-        ammo: 30
+        ammo: 30,
+        abilityCooldown: 0
       };
-      rooms[code].stats[ws.id] = rooms[code].stats[ws.id] || { kills: 0, deaths: 0, damage: 0 };
+
+      rooms[code].stats[ws.id] = rooms[code].stats[ws.id] || {
+        kills: 0,
+        deaths: 0,
+        damage: 0
+      };
+
       ws.room = code;
-      ws.send(JSON.stringify({ type: "room_joined", code, id: ws.id }));
+      ws.send(JSON.stringify({
+        type: "room_joined",
+        code,
+        id: ws.id,
+        worldSize: WORLD_SIZE
+      }));
+
       broadcastRoom(code);
     }
 
-    // update
+    // === UPDATE PLAYER ===
     if (data.type === "update" && ws.room && rooms[ws.room]) {
       const room = rooms[ws.room];
       const p = room.players[ws.id];
       if (!p) return;
+
       p.x = data.x;
       p.y = data.y;
       p.dir = data.dir;
-      if (data.skin) p.skin = data.skin;
-      if (data.name) p.name = data.name;
+      p.skin = data.skin || p.skin;
+      p.name = data.name || p.name;
       p.hp = data.hp ?? p.hp;
       p.ammo = data.ammo ?? p.ammo;
+      p.abilityCooldown = data.abilityCooldown ?? p.abilityCooldown;
+
       broadcastRoom(ws.room);
     }
 
-    // hit
+    // === HIT ===
     if (data.type === "hit" && ws.room && rooms[ws.room]) {
       const room = rooms[ws.room];
       const targetId = data.targetId;
       const dmg = data.damage || 20;
+
       if (!room.players[targetId]) return;
+
       room.players[targetId].hp -= dmg;
-      room.stats[ws.id] = room.stats[ws.id] || { kills: 0, deaths: 0, damage: 0 };
       room.stats[ws.id].damage += dmg;
 
       let killEvent = null;
+
       if (room.players[targetId].hp <= 0) {
         room.players[targetId].hp = 0;
-        room.stats[ws.id].kills = (room.stats[ws.id].kills || 0) + 1;
-        room.stats[targetId] = room.stats[targetId] || { kills: 0, deaths: 0, damage: 0 };
-        room.stats[targetId].deaths = (room.stats[targetId].deaths || 0) + 1;
+
+        room.stats[ws.id].kills++;
+        room.stats[targetId].deaths++;
 
         const pos = randomPos();
         room.players[targetId].x = pos.x;
@@ -148,29 +194,25 @@ wss.on("connection", ws => {
       broadcastRoom(ws.room, killEvent);
     }
 
-    // pickup collected
+    // === PICKUP ===
     if (data.type === "pickup" && ws.room && rooms[ws.room]) {
       const room = rooms[ws.room];
       const pid = data.id;
       const p = room.players[ws.id];
       if (!p || !room.pickups[pid]) return;
+
       const pk = room.pickups[pid];
 
-      if (pk.type === "ammo") {
-        p.ammo += pk.amount;
-      } else if (pk.type === "speed") {
-        // client håndterer effekter, server bare informerer
-      } else if (pk.type === "shield") {
-        // kan utvides
-      } else if (pk.type === "damage") {
-        // kan utvides
-      }
+      if (pk.type === "ammo") p.ammo += pk.amount;
+      if (pk.type === "speed") p.speedBoost = Date.now() + 5000;
+      if (pk.type === "shield") p.shield = 50;
+      if (pk.type === "damage") p.damageBoost = Date.now() + 5000;
 
       delete room.pickups[pid];
       broadcastRoom(ws.room);
     }
 
-    // scoreboard request
+    // === SCOREBOARD ===
     if (data.type === "scoreboard" && ws.room && rooms[ws.room]) {
       const room = rooms[ws.room];
       ws.send(JSON.stringify({
@@ -186,6 +228,7 @@ wss.on("connection", ws => {
       const room = rooms[ws.room];
       delete room.players[ws.id];
       delete room.stats[ws.id];
+
       if (Object.keys(room.players).length === 0) {
         delete rooms[ws.room];
       } else {
@@ -195,14 +238,17 @@ wss.on("connection", ws => {
   });
 });
 
+// === BROADCAST ===
 function broadcastRoom(code, extraEvent = null) {
   const room = rooms[code];
   if (!room) return;
+
   const payload = JSON.stringify({
     type: "players",
     players: room.players,
     pickups: room.pickups,
-    stats: room.stats
+    stats: room.stats,
+    worldSize: WORLD_SIZE
   });
 
   wss.clients.forEach(client => {
