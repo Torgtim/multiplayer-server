@@ -4,7 +4,7 @@ const wss = new WebSocketServer({ port: process.env.PORT || 3000 });
 
 // === WORLD SETTINGS ===
 const WORLD_SIZE = 1500;
-const MAX_PICKUPS = 8;
+const MAX_PICKUPS = 12;
 
 // === ROOM STRUCTURE ===
 // rooms[code] = {
@@ -38,7 +38,8 @@ function spawnPickup(room) {
     type,
     x: pos.x,
     y: pos.y,
-    amount: type === "ammo" ? 15 : 1
+    amount: type === "ammo" ? 15 : 1,
+    createdAt: Date.now()
   };
 }
 
@@ -47,6 +48,13 @@ setInterval(() => {
   for (const code in rooms) {
     const room = rooms[code];
     if (!room) continue;
+
+    // despawn gamle pickups
+    for (const pid in room.pickups) {
+      if (Date.now() - room.pickups[pid].createdAt > 30000) {
+        delete room.pickups[pid];
+      }
+    }
 
     const count = Object.keys(room.pickups).length;
     if (count < MAX_PICKUPS) spawnPickup(room);
@@ -87,7 +95,10 @@ wss.on("connection", ws => {
         frozenUntil: 0,
         poisonUntil: 0,
         poisonDamage: 0,
-        nextPoisonTick: 0
+        nextPoisonTick: 0,
+        speedBoostUntil: 0,
+        damageBoostUntil: 0,
+        shield: 0
       };
 
       rooms[code].stats[ws.id] = { kills: 0, deaths: 0, damage: 0 };
@@ -128,7 +139,10 @@ wss.on("connection", ws => {
         frozenUntil: 0,
         poisonUntil: 0,
         poisonDamage: 0,
-        nextPoisonTick: 0
+        nextPoisonTick: 0,
+        speedBoostUntil: 0,
+        damageBoostUntil: 0,
+        shield: 0
       };
 
       rooms[code].stats[ws.id] = rooms[code].stats[ws.id] || {
@@ -158,10 +172,9 @@ wss.on("connection", ws => {
       if (p.frozenUntil > Date.now()) {
         return;
       } else {
-        p.frozenUntil = 0; // freeze ferdig
+        p.frozenUntil = 0;
       }
 
-      // Anti‑cheat: clamp pos
       const half = WORLD_SIZE / 2;
       p.x = Math.max(-half + 20, Math.min(half - 20, data.x));
       p.y = Math.max(-half + 20, Math.min(half - 20, data.y));
@@ -169,8 +182,9 @@ wss.on("connection", ws => {
       p.dir = data.dir;
       p.skin = data.skin || p.skin;
       p.name = data.name || p.name;
-      p.hp = data.hp ?? p.hp;
-      p.ammo = data.ammo ?? p.ammo;
+      // hp/ammo styres KUN av serveren
+      // p.hp = data.hp ?? p.hp;
+      // p.ammo = data.ammo ?? p.ammo;
 
       broadcastRoom(ws.room);
     }
@@ -208,6 +222,9 @@ wss.on("connection", ws => {
         target.y = pos.y;
         target.hp = 100;
         target.ammo = 30;
+        target.shield = 0;
+        target.speedBoostUntil = 0;
+        target.damageBoostUntil = 0;
 
         killEvent = {
           type: "killfeed",
@@ -251,7 +268,6 @@ wss.on("connection", ws => {
 
       const target = room.players[targetId];
 
-      // 4 dmg × 10 ticks
       target.poisonUntil = Date.now() + 3000;
       target.poisonDamage = 4;
       target.nextPoisonTick = Date.now() + 300;
