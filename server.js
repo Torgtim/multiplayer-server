@@ -42,6 +42,7 @@ function spawnPickup(room) {
   };
 }
 
+// Spawn pickups every 4 sec
 setInterval(() => {
   for (const code in rooms) {
     const room = rooms[code];
@@ -85,7 +86,8 @@ wss.on("connection", ws => {
         ammo: 30,
         frozenUntil: 0,
         poisonUntil: 0,
-        poisonDamage: 0
+        poisonDamage: 0,
+        nextPoisonTick: 0
       };
 
       rooms[code].stats[ws.id] = { kills: 0, deaths: 0, damage: 0 };
@@ -125,7 +127,8 @@ wss.on("connection", ws => {
         ammo: 30,
         frozenUntil: 0,
         poisonUntil: 0,
-        poisonDamage: 0
+        poisonDamage: 0,
+        nextPoisonTick: 0
       };
 
       rooms[code].stats[ws.id] = rooms[code].stats[ws.id] || {
@@ -151,6 +154,13 @@ wss.on("connection", ws => {
       const p = room.players[ws.id];
       if (!p) return;
 
+      // Freeze: hvis fortsatt frosset, ignorer movement
+      if (p.frozenUntil > Date.now()) {
+        return;
+      } else {
+        p.frozenUntil = 0; // freeze ferdig
+      }
+
       // Anti‑cheat: clamp pos
       const half = WORLD_SIZE / 2;
       p.x = Math.max(-half + 20, Math.min(half - 20, data.x));
@@ -175,17 +185,12 @@ wss.on("connection", ws => {
 
       const target = room.players[targetId];
 
-      // Freeze check
-      if (target.frozenUntil > Date.now()) {
-        // still take damage
-      }
-
-      // Shield check
+      // Shield
       if (target.shield > 0) {
         target.shield -= dmg;
         if (target.shield < 0) target.shield = 0;
       } else {
-        target.hp -= dmg;
+        target.hp = Math.max(0, target.hp - dmg);
       }
 
       room.stats[ws.id].damage += dmg;
@@ -222,9 +227,10 @@ wss.on("connection", ws => {
 
       if (!room.players[targetId]) return;
 
-      room.players[targetId].frozenUntil = Date.now() + duration;
+      const target = room.players[targetId];
 
-      // send effect
+      target.frozenUntil = Date.now() + duration;
+
       wss.clients.forEach(c => {
         if (c.room === ws.room) {
           c.send(JSON.stringify({
@@ -236,19 +242,30 @@ wss.on("connection", ws => {
       });
     }
 
-// Poison – 4 damage, 10 ticks, smooth
-if (player.poisonUntil > now) {
-  if (!player.nextPoisonTick) {
-    player.nextPoisonTick = now + (player.poisonTickEvery || 300);
-  }
-  while (now >= player.nextPoisonTick && now <= player.poisonUntil) {
-    player.hp -= player.poisonDamage || 4;
-    player.nextPoisonTick += player.poisonTickEvery || 300;
-  }
-} else {
-  player.nextPoisonTick = null;
-}
+    // === POISON ===
+    if (data.type === "poison" && ws.room && rooms[ws.room]) {
+      const room = rooms[ws.room];
+      const targetId = data.targetId;
 
+      if (!room.players[targetId]) return;
+
+      const target = room.players[targetId];
+
+      // 4 dmg × 10 ticks
+      target.poisonUntil = Date.now() + 3000;
+      target.poisonDamage = 4;
+      target.nextPoisonTick = Date.now() + 300;
+
+      wss.clients.forEach(c => {
+        if (c.room === ws.room) {
+          c.send(JSON.stringify({
+            type: "poison_effect",
+            targetId,
+            damage: 4
+          }));
+        }
+      });
+    }
 
     // === PICKUP ===
     if (data.type === "pickup" && ws.room && rooms[ws.room]) {
