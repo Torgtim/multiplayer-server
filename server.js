@@ -236,27 +236,19 @@ wss.on("connection", ws => {
       });
     }
 
-    // === POISON ===
-    if (data.type === "poison" && ws.room && rooms[ws.room]) {
-      const room = rooms[ws.room];
-      const targetId = data.targetId;
-      const dmg = data.damage;
+// Poison – 4 damage, 10 ticks, smooth
+if (player.poisonUntil > now) {
+  if (!player.nextPoisonTick) {
+    player.nextPoisonTick = now + (player.poisonTickEvery || 300);
+  }
+  while (now >= player.nextPoisonTick && now <= player.poisonUntil) {
+    player.hp -= player.poisonDamage || 4;
+    player.nextPoisonTick += player.poisonTickEvery || 300;
+  }
+} else {
+  player.nextPoisonTick = null;
+}
 
-      if (!room.players[targetId]) return;
-
-      room.players[targetId].poisonUntil = Date.now() + 3000;
-      room.players[targetId].poisonDamage = dmg;
-
-      wss.clients.forEach(c => {
-        if (c.room === ws.room) {
-          c.send(JSON.stringify({
-            type: "poison_effect",
-            targetId,
-            damage: dmg
-          }));
-        }
-      });
-    }
 
     // === PICKUP ===
     if (data.type === "pickup" && ws.room && rooms[ws.room]) {
